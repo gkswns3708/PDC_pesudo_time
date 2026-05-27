@@ -1,0 +1,31 @@
+{
+  "slide": "S14-2289-1-6",
+  "n_patches_in_roi": 2802,
+  "n_patches_cancer_eval": 2218,
+  "n_patches_excluded_by_cancer_mask": 584,
+  "cancer_threshold": 0.5,
+  "gland_threshold": 0.5,
+  "virchow2_column": "p_gland_virchow2",
+  "accuracy": 0.8931469792605952,
+  "f1_macro": 0.5802392240191839,
+  "f1_gland": 0.9426566658601501,
+  "f1_non_gland": 0.21782178217821782,
+  "precision_gland": 0.944713870029098,
+  "precision_non_gland": 0.21153846153846154,
+  "recall_gland": 0.9406084017382906,
+  "recall_non_gland": 0.22448979591836735,
+  "confusion_matrix_cancer_only": [
+    [
+      1948,
+      123
+    ],
+    [
+      114,
+      33
+    ]
+  ],
+  "accuracy_no_mask": 0.9050678087080657,
+  "f1_macro_no_mask": 0.5789198936977981,
+  "n_gt_gland_in_eval": 2071,
+  "n_gt_non_gland_in_eval": 147
+}

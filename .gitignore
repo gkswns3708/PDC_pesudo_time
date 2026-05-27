@@ -1,0 +1,97 @@
+# ----- Secrets -----
+.env
+.env.*
+*.secret
+
+# ----- Python -----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+.hypothesis/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ----- Editor / OS -----
+.vscode/
+.idea/
+.DS_Store
+__MACOSX/
+
+# ----- Large binary / model / archive formats (global) -----
+*.svs
+*.ndpi
+*.mrxs
+*.scn
+*.tif
+*.tiff
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.h5
+*.hdf5
+*.mat
+*.bin
+*.parquet
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.7z
+*.rar
+
+# Reference papers / decks
+*.pdf
+
+# ===== Project-specific data / patches / checkpoints / archives =====
+/Data/
+/Archive/
+/checkpoints/
+/patches_stainnorm/
+/patches_stainnorm_256/
+/Viz/
+/logs/
+
+# ===== results/ : per-slide dirs are large (overlay PNGs). Track only metrics. =====
+# Exclude every file under per-slide / external dirs, then whitelist CSV/MD/JSON/TXT.
+/results/S14-2289-1-6/*
+!/results/S14-2289-1-6/*.csv
+!/results/S14-2289-1-6/*.md
+!/results/S14-2289-1-6/*.json
+!/results/S14-2289-1-6/*.txt
+
+/results/S14-1069-1-6/*
+!/results/S14-1069-1-6/*.csv
+!/results/S14-1069-1-6/*.md
+!/results/S14-1069-1-6/*.json
+!/results/S14-1069-1-6/*.txt
+
+/results/S14-1253-1-3/*
+!/results/S14-1253-1-3/*.csv
+!/results/S14-1253-1-3/*.md
+!/results/S14-1253-1-3/*.json
+!/results/S14-1253-1-3/*.txt
+
+/results/S14-10234-2-3/*
+!/results/S14-10234-2-3/*.csv
+!/results/S14-10234-2-3/*.md
+!/results/S14-10234-2-3/*.json
+!/results/S14-10234-2-3/*.txt
+
+/results/external3/*
+!/results/external3/*.csv
+!/results/external3/*.md
+!/results/external3/*.json
+!/results/external3/*.txt
+
+# Packaged delivery (big)
+/results/_pkg_s14_2289/
