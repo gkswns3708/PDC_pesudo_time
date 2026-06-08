@@ -9,13 +9,13 @@ class Config:
     data_dir: str = "/app/Gland_Seg/Data"
     svs_dir: str = "/app/Gland_Seg/Data/S14/SVS"
     xml_dir: str = "/app/Gland_Seg/Data/S14/Annotation"
-    output_dir: str = "/app/Gland_Seg/patches_stainnorm_256"  # patches_stainnorm when stain_normalize=True, else /app/Gland_Seg/patches
+    output_dir: str = "/app/Gland_Seg/patches_raw_224_20x"
     checkpoint_dir: str = "/app/Gland_Seg/checkpoints"
     log_dir: str = "/app/Gland_Seg/logs"
     viz_dir: str = "/app/Gland_Seg/Viz"
 
     # ── Stain normalization ──
-    stain_normalize: bool = True                                  # apply Macenko at patch extraction
+    stain_normalize: bool = False
     stain_target_path: str = "/app/Gland_Seg/Data/stain_target.png"  # target patch for Macenko.fit()
 
     # ── Slide-to-class mapping (label: gland=0, non-gland=solid=1) ──
@@ -48,9 +48,13 @@ class Config:
     })
 
     # ── Patch extraction ──
-    patch_size: int = 256       # pixels at extraction level
-    stride: int = 128           # 50% overlap
-    extraction_level: int = 0   # level 0 = 40x (0.252 um/px)
+    # Strategy: read 448x448 native @ L0 (40x, 0.252 um/px) → Macenko → downsample to input_size (224)
+    # → save 224 PNG. Each saved patch represents a 448x448 L0 footprint = ~112 um FoV,
+    # MPP_effective = 0.504 ≈ 20x. This matches Virchow2/UNI2/Phikon-v2 pretraining magnification.
+    # SVS files have no true 20x level (L1 is a 1024px thumbnail), so we must read at L0 and downsample.
+    patch_size: int = 448       # L0-pixel footprint of each patch (used by read_region, mask, stride loop, meta)
+    stride: int = 224           # L0 pixels — 50% overlap of 448 native
+    extraction_level: int = 0   # level 0 = 40x (0.252 um/px). L1 is thumbnail, NOT a 20x level.
     tissue_threshold: float = 0.7   # min tissue pixel fraction
     mask_threshold: float = 0.5     # min annotation mask fraction
     extract_workers: int = 48       # multiprocessing workers per slide; 0 or 1 = sequential
@@ -58,7 +62,7 @@ class Config:
     # ── Backbone selection ──
     # See model_registry.REGISTRY for available names:
     #   "resnet18" | "uni2" | "virchow2" | "phikon-v2" | "h-optimus-0" | "uni"
-    backbone: str = "virchow2"
+    backbone: str = "hibou-l"
     head_type: str = "linear"      # "linear" | "mlp"
     amp_dtype: str = "bfloat16"    # "bfloat16" | "float16" | "float32". L40 supports bf16 natively.
 
@@ -75,13 +79,28 @@ class Config:
     lr: float = 1e-4            # base lr @ batch 512 — scales linearly with effective batch via `lr_scale_base`
     lr_scale_base: int = 512    # effective-batch reference for linear-scaling rule
     weight_decay: float = 1e-4
-    unfreeze_epoch: int = 5     # 0~4 LP / 5+ partial FT (last 4 block + norm + head, lr/10). 999=pure LP.
-    patience: int = 5           # early stopping patience on val F1
+    unfreeze_epoch: int = 999   # 0~4 LP / 5+ partial FT (last 4 block + norm + head, lr/10). 999=pure LP.
+    patience: int = 5           # early stopping patience on val F1 (safety net; secondary)
+    ext_patience: int = 3       # early stopping patience on external macro-F1 (PRIMARY).
+                                # Stop if best_ext_state.epoch is >= ext_patience epochs behind current.
     random_seed: int = 42
 
     # ── Class info ──
     class_names: list = field(default_factory=lambda: ["gland", "non-gland"])
     num_classes: int = 2
+
+    # ── Loss function ──
+    # "ce"    : nn.CrossEntropyLoss(weight=class_weights)  — inverse-frequency weighted CE (default)
+    # "focal" : FocalLoss(alpha=class_weights, gamma=focal_gamma) — focus on hard examples
+    loss_type: str = "ce"
+    focal_gamma: float = 2.0
+
+    # ── Run tag ──
+    # Appended to checkpoint filenames, external results dir, training log csv.
+    # base run (256 px / 40x extraction): "" (empty)
+    # 224_20x run (448 native → 224 disk, ~20x effective): "_224_20x"
+    # Convention: leading underscore so paths read naturally (best_model_virchow2_full_224_20x.pth).
+    run_tag: str = "_224_20x_aug"
 
     # ── Viz layout ──
     # Backbone → Viz subdir derived from model_registry.REGISTRY.

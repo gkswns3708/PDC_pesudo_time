@@ -62,9 +62,16 @@ def main():
         sys.exit(1)
     slide = sys.argv[1]
     config = Config()
-    base = Path(config.base_dir) / "results" / slide
-    if not base.exists():
-        sys.exit(f"results dir not found: {base}")
+    # Prefer tagged results dir (e.g. results/S14-2289-1-6_224_20x), fall back to untagged.
+    base_tagged = Path(config.base_dir) / "results" / f"{slide}{config.run_tag}"
+    base_plain = Path(config.base_dir) / "results" / slide
+    if base_tagged.exists():
+        base = base_tagged
+    elif base_plain.exists():
+        base = base_plain
+    else:
+        sys.exit(f"results dir not found: {base_tagged} (nor {base_plain})")
+    print(f"Using results dir: {base}")
 
     df = pd.read_csv(base / "per_patch_predictions_with_hardvote.csv")
     meta = np.load(base / "slide_meta.npy", allow_pickle=True).item()

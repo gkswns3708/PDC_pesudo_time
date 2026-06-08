@@ -33,6 +33,7 @@ from config import Config
 def build_gt_counter(polys, H, W, scale):
     counter = np.zeros((H, W), dtype=np.int16)
     for poly in polys:
+        poly = np.asarray(poly, dtype=np.float64)  # guard against object dtype from npz roundtrip
         pts = (poly / scale).round().astype(np.int32)
         m = np.zeros((H, W), dtype=np.uint8)
         cv2.fillPoly(m, [pts], 1)

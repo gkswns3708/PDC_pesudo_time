@@ -56,8 +56,11 @@ __MACOSX/
 /Data/
 /Archive/
 /checkpoints/
+/patches_raw_224_20x/
 /patches_stainnorm/
+/patches_stainnorm_224_20x/
 /patches_stainnorm_256/
+/_backup_zips/
 /Viz/
 /logs/
 
@@ -92,6 +95,37 @@ __MACOSX/
 !/results/external3/*.md
 !/results/external3/*.json
 !/results/external3/*.txt
+
+# Same metric-only whitelist for byext variants and PDC candidates (large overlay/PNG dirs)
+/results/S14-177-1-5_byext_224_20x_raw_ce/*
+!/results/S14-177-1-5_byext_224_20x_raw_ce/*.csv
+!/results/S14-177-1-5_byext_224_20x_raw_ce/*.md
+!/results/S14-177-1-5_byext_224_20x_raw_ce/*.json
+!/results/S14-177-1-5_byext_224_20x_raw_ce/*.txt
+
+/results/S14-177-1-5_byext_224_20x_subeval250/*
+!/results/S14-177-1-5_byext_224_20x_subeval250/*.csv
+!/results/S14-177-1-5_byext_224_20x_subeval250/*.md
+!/results/S14-177-1-5_byext_224_20x_subeval250/*.json
+!/results/S14-177-1-5_byext_224_20x_subeval250/*.txt
+
+/results/S14-2289-1-6_byext_224_20x_raw_ce/*
+!/results/S14-2289-1-6_byext_224_20x_raw_ce/*.csv
+!/results/S14-2289-1-6_byext_224_20x_raw_ce/*.md
+!/results/S14-2289-1-6_byext_224_20x_raw_ce/*.json
+!/results/S14-2289-1-6_byext_224_20x_raw_ce/*.txt
+
+/results/S14-2289-1-6_byext_224_20x_subeval250/*
+!/results/S14-2289-1-6_byext_224_20x_subeval250/*.csv
+!/results/S14-2289-1-6_byext_224_20x_subeval250/*.md
+!/results/S14-2289-1-6_byext_224_20x_subeval250/*.json
+!/results/S14-2289-1-6_byext_224_20x_subeval250/*.txt
+
+/results/_spider_pdc_candidates/*
+!/results/_spider_pdc_candidates/*.csv
+!/results/_spider_pdc_candidates/*.md
+!/results/_spider_pdc_candidates/*.json
+!/results/_spider_pdc_candidates/*.txt
 
 # Packaged delivery (big)
 /results/_pkg_s14_2289/

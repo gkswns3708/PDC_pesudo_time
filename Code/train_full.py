@@ -26,7 +26,11 @@ import torch.nn as nn
 from lxml import etree
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler, Subset
-from sklearn.metrics import f1_score
+from sklearn.metrics import (
+    f1_score, precision_recall_fscore_support, confusion_matrix,
+    average_precision_score, roc_auc_score, matthews_corrcoef,
+    balanced_accuracy_score,
+)
 from sklearn.exceptions import UndefinedMetricWarning
 from tqdm import tqdm
 
@@ -52,7 +56,28 @@ EXT_GT_THUMB_MAX = 4000
 
 # Sub-epoch external eval frequency (iterations between evals within one epoch).
 # Set to 0 to disable sub-epoch eval (eval only at epoch boundary).
-SUB_EVAL_EVERY_ITERS = 250
+SUB_EVAL_EVERY_ITERS = 100
+
+
+class FocalLoss(nn.Module):
+    """Focal loss for class-imbalanced classification.
+
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+
+    With alpha = inverse-frequency class_weights (same role as CE weight).
+    gamma=0 reduces to weighted CE; gamma=2 is the standard focal value
+    (Lin et al., 2017 — RetinaNet).
+    """
+
+    def __init__(self, alpha, gamma=2.0):
+        super().__init__()
+        self.alpha = alpha          # tensor [num_classes] (per-class weight)
+        self.gamma = float(gamma)
+
+    def forward(self, logits, target):
+        ce = nn.functional.cross_entropy(logits, target, weight=self.alpha, reduction="none")
+        pt = torch.exp(-ce)
+        return ((1.0 - pt) ** self.gamma * ce).mean()
 
 
 def _parse_aperio_polys(xml_path):
@@ -140,7 +165,7 @@ def precompute_external_eval(config, rank):
 
 def _save_byext_ckpt(model, config, epoch, sub_iter, ext_metrics, val_metrics_dict=None):
     """Save best-by-ext checkpoint. sub_iter=None for end-of-epoch saves."""
-    ckpt_path = Path(config.checkpoint_dir) / f"best_model_{config.backbone}_full_byext.pth"
+    ckpt_path = Path(config.checkpoint_dir) / f"best_model_{config.backbone}_full_byext{config.run_tag}.pth"
     raw_model = model.module if hasattr(model, "module") else model
     payload = {
         "backbone": config.backbone, "mode": "full_byext",
@@ -223,14 +248,23 @@ def train_one_epoch_with_subeval(
                 ext = evaluate_external(raw_model, test_data[0], test_data[1],
                                         device, amp_dtype)
                 msg = (f"  {fold_tag} SubEval ep{epoch} iter{done_iter:>5}/{n_total} | "
-                       f"ext macro-F1 {ext['macro_f1']:.4f} | "
-                       f"g {ext['gland_f1']:.4f} | ng {ext['nongland_f1']:.4f} | "
+                       f"macro {ext['macro_f1']:.4f} | "
+                       f"g {ext['gland_f1']:.4f} (P{ext['precision_gland']:.2f}/R{ext['recall_gland']:.2f}) | "
+                       f"ng {ext['nongland_f1']:.4f} (P{ext['precision_nongland']:.2f}/R{ext['recall_nongland']:.2f}) | "
+                       f"PR-AUC {ext['pr_auc_ng']:.3f} | MCC {ext['mcc']:.3f} | "
                        f"best-ext {best_ext_state['f1']:.4f}@e{best_ext_state['epoch']}"
                        f"{':i'+str(best_ext_state['iter']) if best_ext_state['iter'] else ''}")
                 pbar.write(msg)
                 if sub_eval_log is not None:
-                    sub_eval_log.append((epoch, done_iter, ext["macro_f1"],
-                                         ext["gland_f1"], ext["nongland_f1"]))
+                    sub_eval_log.append((
+                        epoch, done_iter, ext["macro_f1"],
+                        ext["gland_f1"], ext["nongland_f1"],
+                        ext["precision_gland"], ext["recall_gland"],
+                        ext["precision_nongland"], ext["recall_nongland"],
+                        ext["pr_auc_ng"], ext["roc_auc_ng"],
+                        ext["mcc"], ext["balanced_acc"],
+                        ext["tp_ng"], ext["fp_ng"], ext["fn_ng"], ext["tn_ng"],
+                    ))
                 if ext["macro_f1"] > best_ext_state["f1"]:
                     best_ext_state["f1"] = ext["macro_f1"]
                     best_ext_state["epoch"] = epoch
@@ -254,11 +288,23 @@ def train_one_epoch_with_subeval(
 
 
 @torch.no_grad()
-def evaluate_external(model, patches_u8, gt, device, amp_dtype, batch_size=128):
-    """Forward all test patches → argmax → F1. Returns dict of metrics."""
+def evaluate_external(model, patches_u8, gt, device, amp_dtype, batch_size=128,
+                       threshold_sweep=(0.3, 0.4, 0.5, 0.6, 0.7)):
+    """Forward all test patches → softmax → per-class metrics + threshold sweep.
+
+    Labels: 0=gland, 1=non-gland. Probabilities p_ng = softmax[:,1].
+    Returns dict with:
+      F1: macro_f1, gland_f1, nongland_f1
+      Per-class P/R: precision_gland, recall_gland, precision_nongland, recall_nongland
+      Clinical: sensitivity_ng (= recall_nongland), specificity_ng (= recall_gland)
+      Probability-based: pr_auc_ng, roc_auc_ng
+      Single robust: mcc, balanced_acc
+      Counts: tp/fp/fn/tn (non-gland positive class)
+      Threshold sweep: thr_<v>_recall_ng, thr_<v>_precision_ng (for v in threshold_sweep)
+    """
     from infer_external_slide import imagenet_normalize  # lazy
     model.eval()
-    preds = []
+    all_probs = []
     use_amp = amp_dtype in (torch.bfloat16, torch.float16)
     for i in range(0, len(patches_u8), batch_size):
         batch = patches_u8[i:i + batch_size]
@@ -268,19 +314,83 @@ def evaluate_external(model, patches_u8, gt, device, amp_dtype, batch_size=128):
                 logits = model(x)
         else:
             logits = model(x)
-        preds.append(logits.argmax(dim=1).cpu().numpy())
-    preds = np.concatenate(preds).astype(np.int8)
+        prob_ng = torch.softmax(logits.float(), dim=1)[:, 1].cpu().numpy()
+        all_probs.append(prob_ng)
+    probs_ng = np.concatenate(all_probs)            # (N,) prob of non-gland
+    preds = (probs_ng >= 0.5).astype(np.int8)       # default threshold 0.5
+
+    empty_thr_sweep = {f"thr_{v}_recall_ng": 0.0 for v in threshold_sweep}
+    empty_thr_sweep.update({f"thr_{v}_precision_ng": 0.0 for v in threshold_sweep})
 
     mask = gt >= 0
     if int(mask.sum()) == 0:
         return {"macro_f1": 0.0, "gland_f1": 0.0, "nongland_f1": 0.0, "acc": 0.0,
-                "n_eval": 0}
-    gt_e = gt[mask]; pred_e = preds[mask]
+                "n_eval": 0,
+                "precision_gland": 0.0, "recall_gland": 0.0,
+                "precision_nongland": 0.0, "recall_nongland": 0.0,
+                "sensitivity_ng": 0.0, "specificity_ng": 0.0,
+                "pr_auc_ng": 0.0, "roc_auc_ng": 0.0, "mcc": 0.0, "balanced_acc": 0.0,
+                "tp_ng": 0, "fp_ng": 0, "fn_ng": 0, "tn_ng": 0,
+                **empty_thr_sweep}
+
+    gt_e = gt[mask].astype(np.int8)
+    pred_e = preds[mask]
+    probs_e = probs_ng[mask]
+
+    # Basic
+    acc = float((gt_e == pred_e).mean())
     macro = f1_score(gt_e, pred_e, average="macro", zero_division=0)
     f1_per = f1_score(gt_e, pred_e, labels=[0, 1], average=None, zero_division=0)
-    acc = float((gt_e == pred_e).mean())
-    return {"macro_f1": float(macro), "gland_f1": float(f1_per[0]),
-            "nongland_f1": float(f1_per[1]), "acc": acc, "n_eval": int(mask.sum())}
+
+    # Per-class P/R
+    prec_per, rec_per, _, _ = precision_recall_fscore_support(
+        gt_e, pred_e, labels=[0, 1], zero_division=0)
+
+    # Confusion matrix (non-gland as positive class)
+    cm = confusion_matrix(gt_e, pred_e, labels=[0, 1])
+    # cm[true][pred]: cm[0][0]=TN_ng (gland correctly), cm[0][1]=FP_ng (gland→non-gland),
+    # cm[1][0]=FN_ng (non-gland missed), cm[1][1]=TP_ng (non-gland correctly)
+    tn_ng, fp_ng = int(cm[0, 0]), int(cm[0, 1])
+    fn_ng, tp_ng = int(cm[1, 0]), int(cm[1, 1])
+
+    # Probability-based (need both classes present)
+    try:
+        pr_auc_ng = float(average_precision_score(gt_e, probs_e))
+        roc_auc_ng = float(roc_auc_score(gt_e, probs_e))
+    except ValueError:
+        pr_auc_ng = 0.0; roc_auc_ng = 0.0
+
+    # Single robust scores
+    mcc = float(matthews_corrcoef(gt_e, pred_e))
+    bal_acc = float(balanced_accuracy_score(gt_e, pred_e))
+
+    # Threshold sweep — non-gland P/R at multiple decision thresholds
+    thr_metrics = {}
+    for v in threshold_sweep:
+        pred_v = (probs_e >= v).astype(np.int8)
+        prec_v, rec_v, _, _ = precision_recall_fscore_support(
+            gt_e, pred_v, labels=[1], average=None, zero_division=0)
+        thr_metrics[f"thr_{v}_precision_ng"] = float(prec_v[0])
+        thr_metrics[f"thr_{v}_recall_ng"] = float(rec_v[0])
+
+    return {
+        "macro_f1": float(macro),
+        "gland_f1": float(f1_per[0]),
+        "nongland_f1": float(f1_per[1]),
+        "acc": acc, "n_eval": int(mask.sum()),
+        "precision_gland": float(prec_per[0]),
+        "recall_gland": float(rec_per[0]),
+        "precision_nongland": float(prec_per[1]),
+        "recall_nongland": float(rec_per[1]),
+        "sensitivity_ng": float(rec_per[1]),     # alias for clinical convention
+        "specificity_ng": float(rec_per[0]),     # gland recall = non-gland specificity
+        "pr_auc_ng": pr_auc_ng,
+        "roc_auc_ng": roc_auc_ng,
+        "mcc": mcc,
+        "balanced_acc": bal_acc,
+        "tp_ng": tp_ng, "fp_ng": fp_ng, "fn_ng": fn_ng, "tn_ng": tn_ng,
+        **thr_metrics,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -359,7 +469,16 @@ def main():
     class_weights = 1.0 / np.maximum(class_counts, 1)
     class_weights = class_weights / class_weights.sum() * len(class_weights)
     class_weights = torch.FloatTensor(class_weights).to(device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+    # ── Loss selection (CE vs Focal) ──
+    if getattr(config, "loss_type", "ce") == "focal":
+        criterion = FocalLoss(alpha=class_weights, gamma=config.focal_gamma)
+        if is_main(rank):
+            print(f"  Loss: FocalLoss(gamma={config.focal_gamma}, alpha=class_weights)", flush=True)
+    else:
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        if is_main(rank):
+            print(f"  Loss: CrossEntropyLoss(weight=class_weights)", flush=True)
 
     # ── LR + optimizer ──
     effective_batch = config.batch_size * world_size
@@ -438,7 +557,7 @@ def main():
             best_val_epoch = epoch
             patience_counter = 0
             if is_main(rank):
-                ckpt_path = Path(config.checkpoint_dir) / f"best_model_{config.backbone}_full.pth"
+                ckpt_path = Path(config.checkpoint_dir) / f"best_model_{config.backbone}_full{config.run_tag}.pth"
                 raw_model = model.module if hasattr(model, "module") else model
                 torch.save({
                     "backbone": config.backbone, "mode": "full",
@@ -464,14 +583,42 @@ def main():
                                     device, amp_dtype)
             print(
                 f"  {fold_tag} Ext (S14-2289-1-6, n={ext['n_eval']}): "
-                f"macro-F1 {ext['macro_f1']:.4f} | gland {ext['gland_f1']:.4f} | "
-                f"non-gland {ext['nongland_f1']:.4f} | acc {ext['acc']:.4f} | "
-                f"best-ext {best_ext_state['f1']:.4f}@e{best_ext_state['epoch']}"
+                f"macro {ext['macro_f1']:.4f} | "
+                f"g {ext['gland_f1']:.4f}(P{ext['precision_gland']:.2f}/R{ext['recall_gland']:.2f}) | "
+                f"ng {ext['nongland_f1']:.4f}(P{ext['precision_nongland']:.2f}/R{ext['recall_nongland']:.2f}) | "
+                f"acc {ext['acc']:.4f} | bal-acc {ext['balanced_acc']:.4f} | "
+                f"PR-AUC {ext['pr_auc_ng']:.3f} | ROC-AUC {ext['roc_auc_ng']:.3f} | MCC {ext['mcc']:.3f}",
+                flush=True,
+            )
+            # Confusion matrix (non-gland positive class)
+            print(
+                f"  {fold_tag}   Confusion (ng+):  TP={ext['tp_ng']:>4}  FP={ext['fp_ng']:>4}  "
+                f"FN={ext['fn_ng']:>4}  TN={ext['tn_ng']:>4}  | "
+                f"Sens(ng)={ext['sensitivity_ng']:.3f} Spec(ng)={ext['specificity_ng']:.3f}",
+                flush=True,
+            )
+            # Threshold sweep — non-gland P/R at multiple decision thresholds
+            tsweep_parts = []
+            for thr_v in (0.3, 0.4, 0.5, 0.6, 0.7):
+                tsweep_parts.append(
+                    f"thr{thr_v}:P{ext[f'thr_{thr_v}_precision_ng']:.2f}/R{ext[f'thr_{thr_v}_recall_ng']:.2f}"
+                )
+            print(f"  {fold_tag}   Thresh sweep (ng): {' | '.join(tsweep_parts)}", flush=True)
+
+            print(
+                f"  {fold_tag}   best-ext {best_ext_state['f1']:.4f}@e{best_ext_state['epoch']}"
                 f"{':i'+str(best_ext_state['iter']) if best_ext_state['iter'] else ''}",
                 flush=True,
             )
-            epoch_log.append((epoch, val_metrics["f1"], ext["macro_f1"],
-                              ext["gland_f1"], ext["nongland_f1"]))
+            epoch_log.append((
+                epoch, val_metrics["f1"], ext["macro_f1"],
+                ext["gland_f1"], ext["nongland_f1"],
+                ext["precision_gland"], ext["recall_gland"],
+                ext["precision_nongland"], ext["recall_nongland"],
+                ext["pr_auc_ng"], ext["roc_auc_ng"],
+                ext["mcc"], ext["balanced_acc"],
+                ext["tp_ng"], ext["fp_ng"], ext["fn_ng"], ext["tn_ng"],
+            ))
 
             if ext["macro_f1"] > best_ext_state["f1"]:
                 best_ext_state["f1"] = ext["macro_f1"]
@@ -481,7 +628,29 @@ def main():
                 print(f"  {fold_tag} >> Saved best-by-ext (macro-F1={ext['macro_f1']:.4f}) "
                       f"at epoch {epoch} (end)", flush=True)
 
+            # ── Ext-based early stop (PRIMARY) ──
+            # best_ext_state["epoch"] is updated by both sub-eval (inside train loop)
+            # and end-of-epoch eval above. If best ext was N epochs ago, stop.
+            ext_no_improve = epoch - best_ext_state["epoch"] if best_ext_state["epoch"] > 0 else 0
+            if ext_no_improve >= config.ext_patience:
+                print(f"  {fold_tag} Early stopping at epoch {epoch} "
+                      f"(ext_patience {config.ext_patience}, "
+                      f"best ext_f1 {best_ext_state['f1']:.4f}@e{best_ext_state['epoch']}"
+                      f"{':i'+str(best_ext_state['iter']) if best_ext_state['iter'] else ''})",
+                      flush=True)
+                # Signal other ranks via a tensor broadcast or just rely on barrier+break.
+                # Since only rank 0 runs ext eval, we need to broadcast the stop signal.
+                _ext_stop = torch.tensor(1, device=device)
+            else:
+                _ext_stop = torch.tensor(0, device=device)
+        else:
+            _ext_stop = torch.tensor(0, device=device)
+
+        if world_size > 1:
+            dist.broadcast(_ext_stop, src=0)
         barrier(device)
+        if int(_ext_stop.item()) == 1:
+            break
 
     # ── Summary ──
     if is_main(rank):
@@ -506,20 +675,25 @@ def main():
 
         try:
             import csv
+            EXT_FULL_COLS = [
+                "ext_macro_f1", "ext_gland_f1", "ext_nongland_f1",
+                "precision_gland", "recall_gland",
+                "precision_nongland", "recall_nongland",
+                "pr_auc_ng", "roc_auc_ng", "mcc", "balanced_acc",
+                "tp_ng", "fp_ng", "fn_ng", "tn_ng",
+            ]
             if epoch_log:
-                csv_path = Path(config.log_dir) / f"epoch_log_{config.backbone}_full.csv"
+                csv_path = Path(config.log_dir) / f"epoch_log_{config.backbone}_full{config.run_tag}.csv"
                 with open(csv_path, "w", newline="") as f:
                     w = csv.writer(f)
-                    w.writerow(["epoch", "val_f1", "ext_macro_f1",
-                                "ext_gland_f1", "ext_nongland_f1"])
+                    w.writerow(["epoch", "val_f1"] + EXT_FULL_COLS)
                     w.writerows(epoch_log)
                 print(f"  epoch log CSV: {csv_path}", flush=True)
             if sub_eval_log:
-                sub_csv = Path(config.log_dir) / f"subeval_log_{config.backbone}_full.csv"
+                sub_csv = Path(config.log_dir) / f"subeval_log_{config.backbone}_full{config.run_tag}.csv"
                 with open(sub_csv, "w", newline="") as f:
                     w = csv.writer(f)
-                    w.writerow(["epoch", "iter", "ext_macro_f1",
-                                "ext_gland_f1", "ext_nongland_f1"])
+                    w.writerow(["epoch", "iter"] + EXT_FULL_COLS)
                     w.writerows(sub_eval_log)
                 print(f"  sub-eval CSV: {sub_csv}", flush=True)
         except Exception as e:

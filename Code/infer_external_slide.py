@@ -172,8 +172,8 @@ def main():
         models = args.models
     else:
         models = []
-        for ckpt in sorted(ckpt_dir.glob("best_model_*_full.pth")):
-            bb = ckpt.stem.replace("best_model_", "").replace("_full", "")
+        for ckpt in sorted(ckpt_dir.glob(f"best_model_*_full{config.run_tag}.pth")):
+            bb = ckpt.stem.replace("best_model_", "").replace(f"_full{config.run_tag}", "")
             models.append(bb)
     print(f"Models (ensemble): {models}")
     if not models:
@@ -203,11 +203,11 @@ def main():
     if args.out_dir:
         out_dir = Path(args.out_dir)
     else:
-        out_dir = Path(config.base_dir) / "results" / args.slide
+        out_dir = Path(config.base_dir) / "results" / f"{args.slide}{config.run_tag}"
     out_dir.mkdir(parents=True, exist_ok=True)
     per_model_probs = {}
     for bb in models:
-        ckpt_path = ckpt_dir / f"best_model_{bb}_full.pth"
+        ckpt_path = ckpt_dir / f"best_model_{bb}_full{config.run_tag}.pth"
         if not ckpt_path.exists():
             print(f"  [skip] {ckpt_path} not found")
             continue

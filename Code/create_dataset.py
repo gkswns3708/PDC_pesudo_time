@@ -94,6 +94,13 @@ def _process_position(ix_iy):
         except Exception:
             return None
 
+    # Downsample native patch (e.g. 448) → input_size (e.g. 224) for disk save.
+    # INTER_AREA is the correct choice for downsampling (anti-aliased mean).
+    input_size = p["input_size"]
+    if patch_rgb.shape[0] != input_size:
+        patch_rgb = cv2.resize(patch_rgb, (input_size, input_size),
+                               interpolation=cv2.INTER_AREA)
+
     fname = f"{p['slide_name']}_{abs_x}_{abs_y}.png"
     cv2.imwrite(
         str(Path(p["save_dir"]) / fname),
@@ -251,6 +258,7 @@ def prepare_slide(svs_path, xml_path, slide_name, class_name, class_label, confi
         "extraction_level": config.extraction_level,
         "tissue_threshold": config.tissue_threshold,
         "mask_threshold": config.mask_threshold,
+        "input_size": config.input_size,
     }
 
     return {
